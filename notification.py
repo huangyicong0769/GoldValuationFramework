@@ -25,12 +25,16 @@ class EmailNotifier:
     def __init__(self, config: EmailConfig) -> None:
         self.config = config
 
-    def send(self, subject: str, body: str) -> None:
+    def send(self, subject: str, body: str, is_html: bool = False) -> None:
         message = EmailMessage()
         message["From"] = self.config.sender
         message["To"] = self.config.recipient
         message["Subject"] = subject
-        message.set_content(body)
+        
+        if is_html:
+            message.set_content(body, subtype="html")
+        else:
+            message.set_content(body)
 
         use_ssl = self.config.use_ssl or self.config.port in {465, 994}
         if use_ssl:

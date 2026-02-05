@@ -46,6 +46,16 @@ class Settings:
     train_window: int | None = None
     refit_full_after_eval: bool = True
     use_realtime_last_close: bool = True
+    llm_api_key: str | None = None
+    llm_base_url: str | None = None
+    llm_model: str = "gpt-4o"
+    llm_min_interval_seconds: int = 8
+    llm_lock_timeout_seconds: int = 300
+    llm_max_output_tokens: int = 128000
+    llm_max_input_chars: int = 128000
+    llm_empty_retry_count: int = 2
+    llm_empty_retry_delay_seconds: int = 5
+    llm_report_language: str = "Chinese"
 
 
     @staticmethod
@@ -96,6 +106,16 @@ class Settings:
             train_window=int(train_window_raw) if train_window_raw else None,
             refit_full_after_eval=refit_full_after_eval,
             use_realtime_last_close=use_realtime_last_close,
+            llm_api_key=os.getenv("LLM_API_KEY"),
+            llm_base_url=os.getenv("LLM_BASE_URL"),
+            llm_model=os.getenv("LLM_MODEL", "gpt-4o"),
+            llm_min_interval_seconds=int(os.getenv("LLM_MIN_INTERVAL_SECONDS", "8")),
+            llm_lock_timeout_seconds=int(os.getenv("LLM_LOCK_TIMEOUT_SECONDS", "300")),
+            llm_max_output_tokens=int(os.getenv("LLM_MAX_OUTPUT_TOKENS", "128000")),
+            llm_max_input_chars=int(os.getenv("LLM_MAX_INPUT_CHARS", "128000")),
+            llm_report_language=os.getenv("LLM_REPORT_LANGUAGE", "Chinese"),
+            llm_empty_retry_count=int(os.getenv("LLM_EMPTY_RETRY_COUNT", "2")),
+            llm_empty_retry_delay_seconds=int(os.getenv("LLM_EMPTY_RETRY_DELAY_SECONDS", "5")),
         )
 
 
