@@ -1,5 +1,9 @@
 # Gold Valuation Framework
 
+This project is developed entirely using Vibe coding. The codebase, tooling, and CI are built and maintained with the Vibe coding methodology and toolset. The code have not been reviewed and may be low in quality.
+
+**Investment disclaimer:** This repository is provided for research and educational purposes only and **is not** financial advice. The models, data, and reports here are experimental and carry no guarantee of accuracy or future performance. Do not rely on this project for trading decisions — always consult a licensed financial professional before making investments.
+
 ## Features
 
 - Automatically discovers and organizes macro and market factors related to gold (defaults included, extensible)
