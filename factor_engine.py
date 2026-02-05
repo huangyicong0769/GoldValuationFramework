@@ -129,81 +129,101 @@ class FactorBuilder:
         if any(col.startswith("gold") for col in target_cols):
             LOGGER.info("Skip gold-derived features to avoid autoregressive OHLC usage")
 
+        cols_to_process = [
+            col for col in data.columns 
+            if col not in target_cols and not col.startswith("gold")
+        ]
+
         derived_frames: list[pd.DataFrame] = []
-        for column in data.columns:
-            if column in target_cols or column.startswith("gold"):
-                continue
-            series = data[column]
-            rolling_7 = series.rolling(window=7)
-            rolling_30 = series.rolling(window=30)
-            rolling_90 = series.rolling(window=90)
-            ema_12 = series.ewm(span=12, adjust=False).mean()
-            ema_26 = series.ewm(span=26, adjust=False).mean()
-            macd = ema_12 - ema_26
-            derived_frames.append(
-                pd.DataFrame(
-                    {
-                        f"{column}_pct": series.pct_change(),
-                        f"{column}_pct5": series.pct_change(5),
-                        f"{column}_pct21": series.pct_change(21),
-                        f"{column}_ma7": rolling_7.mean(),
-                        f"{column}_ma30": rolling_30.mean(),
-                        f"{column}_ma90": rolling_90.mean(),
-                        f"{column}_std7": rolling_7.std(),
-                        f"{column}_std30": rolling_30.std(),
-                        f"{column}_std90": rolling_90.std(),
-                        f"{column}_z30": (series - rolling_30.mean()) / rolling_30.std(),
-                        f"{column}_z90": (series - rolling_90.mean()) / rolling_90.std(),
-                        f"{column}_lag1": series.shift(1),
-                        f"{column}_lag5": series.shift(5),
-                        f"{column}_lag21": series.shift(21),
-                        f"{column}_ema12": ema_12,
-                        f"{column}_ema26": ema_26,
-                        f"{column}_macd": macd,
-                        f"{column}_macd_signal": macd.ewm(span=9, adjust=False).mean(),
-                    },
-                    index=data.index,
-                )
+        std_safeguard_value = 1e-12
+        if cols_to_process:
+            subset = data[cols_to_process]
+
+            rolling_7 = subset.rolling(window=7)
+            rolling_30 = subset.rolling(window=30)
+            rolling_90 = subset.rolling(window=90)
+
+            rolling_7_mean = rolling_7.mean()
+            rolling_30_mean = rolling_30.mean()
+            rolling_90_mean = rolling_90.mean()
+            rolling_7_std = rolling_7.std()
+            rolling_30_std = rolling_30.std()
+            rolling_90_std = rolling_90.std()
+
+            rolling_30_std_safe = rolling_30_std.mask(
+                np.isclose(rolling_30_std, 0),
+                std_safeguard_value,
             )
-        if derived_frames:
-            features = pd.concat([features] + derived_frames, axis=1)
+            rolling_90_std_safe = rolling_90_std.mask(
+                np.isclose(rolling_90_std, 0),
+                std_safeguard_value,
+            )
+
+            ema_12 = subset.ewm(span=12, adjust=False).mean()
+            ema_26 = subset.ewm(span=26, adjust=False).mean()
+            macd = ema_12 - ema_26
+            macd_signal = macd.ewm(span=9, adjust=False).mean()
+
+            derived_frames = [
+                subset.pct_change().add_suffix("_pct"),
+                subset.pct_change(5).add_suffix("_pct5"),
+                subset.pct_change(21).add_suffix("_pct21"),
+                rolling_7_mean.add_suffix("_ma7"),
+                rolling_30_mean.add_suffix("_ma30"),
+                rolling_90_mean.add_suffix("_ma90"),
+                rolling_7_std.add_suffix("_std7"),
+                rolling_30_std.add_suffix("_std30"),
+                rolling_90_std.add_suffix("_std90"),
+                ((subset - rolling_30_mean) / rolling_30_std_safe).add_suffix("_z30"),
+                ((subset - rolling_90_mean) / rolling_90_std_safe).add_suffix("_z90"),
+                subset.shift(1).add_suffix("_lag1"),
+                subset.shift(5).add_suffix("_lag5"),
+                subset.shift(21).add_suffix("_lag21"),
+                ema_12.add_suffix("_ema12"),
+                ema_26.add_suffix("_ema26"),
+                macd.add_suffix("_macd"),
+                macd_signal.add_suffix("_macd_signal"),
+            ]
+
+        # Additional features collection to prevent fragmentation
+        additional_features = []
 
         if "DGS10" in features.columns and "DGS2" in features.columns:
             curve = features["DGS10"] - features["DGS2"]
-            features["yc_10y2y"] = curve
-            features["yc_10y2y_chg"] = curve.diff()
-            features["yc_10y2y_ma30"] = curve.rolling(window=30).mean()
-            features["yc_10y2y_std30"] = curve.rolling(window=30).std()
+            additional_features.append(curve.rename("yc_10y2y"))
+            additional_features.append(curve.diff().rename("yc_10y2y_chg"))
+            additional_features.append(curve.rolling(window=30).mean().rename("yc_10y2y_ma30"))
+            additional_features.append(curve.rolling(window=30).std().rename("yc_10y2y_std30"))
 
         if "DGS10" in features.columns and "DGS3MO" in features.columns:
-            features["yc_10y3m"] = features["DGS10"] - features["DGS3MO"]
+            additional_features.append((features["DGS10"] - features["DGS3MO"]).rename("yc_10y3m"))
 
         if "DGS10" in features.columns and "DGS5" in features.columns:
-            features["yc_10y5y"] = features["DGS10"] - features["DGS5"]
+            additional_features.append((features["DGS10"] - features["DGS5"]).rename("yc_10y5y"))
 
         if "DGS30" in features.columns and "DGS10" in features.columns:
-            features["yc_30y10y"] = features["DGS30"] - features["DGS10"]
+            additional_features.append((features["DGS30"] - features["DGS10"]).rename("yc_30y10y"))
 
         if "T10YIE" in features.columns:
             breakeven = features["T10YIE"]
-            features["t10yie_chg"] = breakeven.diff()
-            features["t10yie_ma30"] = breakeven.rolling(window=30).mean()
-            features["t10yie_std30"] = breakeven.rolling(window=30).std()
+            additional_features.append(breakeven.diff().rename("t10yie_chg"))
+            additional_features.append(breakeven.rolling(window=30).mean().rename("t10yie_ma30"))
+            additional_features.append(breakeven.rolling(window=30).std().rename("t10yie_std30"))
 
         if "T5YIE" in features.columns:
             breakeven_5y = features["T5YIE"]
-            features["t5yie_chg"] = breakeven_5y.diff()
-            features["t5yie_ma30"] = breakeven_5y.rolling(window=30).mean()
-            features["t5yie_std30"] = breakeven_5y.rolling(window=30).std()
+            additional_features.append(breakeven_5y.diff().rename("t5yie_chg"))
+            additional_features.append(breakeven_5y.rolling(window=30).mean().rename("t5yie_ma30"))
+            additional_features.append(breakeven_5y.rolling(window=30).std().rename("t5yie_std30"))
 
         if "DGS10" in features.columns and "T10YIE" in features.columns:
             real_rate = features["DGS10"] - features["T10YIE"]
-            features["real_rate_proxy"] = real_rate
-            features["real_rate_proxy_ma30"] = real_rate.rolling(window=30).mean()
-            features["real_rate_proxy_chg"] = real_rate.diff()
+            additional_features.append(real_rate.rename("real_rate_proxy"))
+            additional_features.append(real_rate.rolling(window=30).mean().rename("real_rate_proxy_ma30"))
+            additional_features.append(real_rate.diff().rename("real_rate_proxy_chg"))
 
         if "DGS5" in features.columns and "T5YIE" in features.columns:
-            features["real_rate_proxy_5y"] = features["DGS5"] - features["T5YIE"]
+            additional_features.append((features["DGS5"] - features["T5YIE"]).rename("real_rate_proxy_5y"))
 
         equity_pct_cols = [
             col
@@ -212,14 +232,14 @@ class FactorBuilder:
         ]
         if equity_pct_cols:
             equity_avg = features[equity_pct_cols].mean(axis=1)
-            features["equity_avg_pct"] = equity_avg
-            features["equity_avg_vol30"] = equity_avg.rolling(window=30).std()
+            additional_features.append(equity_avg.rename("equity_avg_pct"))
+            additional_features.append(equity_avg.rolling(window=30).std().rename("equity_avg_vol30"))
 
             if "vix_pct" in features.columns:
-                features["risk_appetite"] = equity_avg - features["vix_pct"]
+                additional_features.append((equity_avg - features["vix_pct"]).rename("risk_appetite"))
 
             if "usdidx_pct" in features.columns:
-                features["equity_vs_usd"] = equity_avg - features["usdidx_pct"]
+                additional_features.append((equity_avg - features["usdidx_pct"]).rename("equity_vs_usd"))
 
         if any(col.startswith("gold") for col in features.columns):
             keep_prefixes = ("gold_lag", "gold_ret", "gold_ma", "gold_std")
@@ -234,27 +254,41 @@ class FactorBuilder:
                 features = features.drop(columns=drop_gold)
 
         gold_base_cols = [col for col in target_cols if col in data.columns]
-        for col in gold_base_cols:
-            series = data[col]
-            features[f"{col}_lag1"] = series.shift(1)
-            features[f"{col}_lag2"] = series.shift(2)
-            features[f"{col}_lag5"] = series.shift(5)
-            features[f"{col}_lag10"] = series.shift(10)
-            features[f"{col}_lag21"] = series.shift(21)
-            features[f"{col}_ret1"] = series.pct_change(1)
-            features[f"{col}_ret5"] = series.pct_change(5)
-            features[f"{col}_ma5"] = series.rolling(window=5).mean().shift(1)
-            features[f"{col}_ma21"] = series.rolling(window=21).mean().shift(1)
-            features[f"{col}_ma60"] = series.rolling(window=60).mean().shift(1)
-            features[f"{col}_std5"] = series.rolling(window=5).std().shift(1)
-            features[f"{col}_std21"] = series.rolling(window=21).std().shift(1)
+        if gold_base_cols:
+            g_subset = data[gold_base_cols]
+            additional_features.append(g_subset.shift(1).add_suffix("_lag1"))
+            additional_features.append(g_subset.shift(2).add_suffix("_lag2"))
+            additional_features.append(g_subset.shift(5).add_suffix("_lag5"))
+            additional_features.append(g_subset.shift(10).add_suffix("_lag10"))
+            additional_features.append(g_subset.shift(21).add_suffix("_lag21"))
+            additional_features.append(g_subset.pct_change(1).add_suffix("_ret1"))
+            additional_features.append(g_subset.pct_change(5).add_suffix("_ret5"))
+            
+            g_roll5 = g_subset.rolling(window=5)
+            g_roll21 = g_subset.rolling(window=21)
+            g_roll60 = g_subset.rolling(window=60)
+            
+            additional_features.append(g_roll5.mean().shift(1).add_suffix("_ma5"))
+            additional_features.append(g_roll21.mean().shift(1).add_suffix("_ma21"))
+            additional_features.append(g_roll60.mean().shift(1).add_suffix("_ma60"))
+            additional_features.append(g_roll5.std().shift(1).add_suffix("_std5"))
+            additional_features.append(g_roll21.std().shift(1).add_suffix("_std21"))
 
         if isinstance(features.index, pd.DatetimeIndex):
-            features["cal_month"] = features.index.month
-            features["cal_quarter"] = features.index.quarter
-            features["cal_dayofweek"] = features.index.dayofweek
-            features["cal_weekofyear"] = features.index.isocalendar().week.astype(int)
+            cal_df = pd.DataFrame(
+                {
+                    "cal_month": features.index.month,
+                    "cal_quarter": features.index.quarter,
+                    "cal_dayofweek": features.index.dayofweek,
+                    "cal_weekofyear": features.index.isocalendar().week.astype(int),
+                },
+                index=features.index,
+            )
+            additional_features.append(cal_df)
 
+        liquidity_index = None
+        debt_index = None
+        
         liquidity_components = [
             name
             for name in ["M2SL", "TOTLL", "WALCL", "WRESBAL", "RRPONTSYD", "BOGMBASE"]
@@ -264,19 +298,39 @@ class FactorBuilder:
             component_frame = features[liquidity_components]
             rolling_mean = component_frame.rolling(window=252, min_periods=60).mean()
             rolling_std = component_frame.rolling(window=252, min_periods=60).std()
-            zscores = (component_frame - rolling_mean) / rolling_std
-            features["liquidity_index"] = zscores.mean(axis=1)
+            rolling_std_safe = rolling_std.mask(
+                np.isclose(rolling_std, 0),
+                std_safeguard_value,
+            )
+            zscores = (component_frame - rolling_mean) / rolling_std_safe
+            liquidity_index = zscores.mean(axis=1)
+            additional_features.append(liquidity_index.rename("liquidity_index"))
 
         if "GFDEBTN" in features.columns:
             debt = features["GFDEBTN"]
             debt_mean = debt.rolling(window=252, min_periods=60).mean()
             debt_std = debt.rolling(window=252, min_periods=60).std()
-            features["debt_index"] = (debt - debt_mean) / debt_std
-
-        if "liquidity_index" in features.columns and "debt_index" in features.columns:
-            features["neutral_balance"] = (
-                features["liquidity_index"] - features["debt_index"]
+            debt_std_safe = debt_std.mask(
+                np.isclose(debt_std, 0),
+                std_safeguard_value,
             )
+            debt_index = (debt - debt_mean) / debt_std_safe
+            additional_features.append(debt_index.rename("debt_index"))
+
+        if liquidity_index is not None and debt_index is not None:
+            additional_features.append((liquidity_index - debt_index).rename("neutral_balance"))
+            
+        if derived_frames or additional_features:
+            frames_to_concat: list[pd.DataFrame] = [features]
+            if derived_frames:
+                frames_to_concat.extend(derived_frames)
+            if additional_features:
+                normalized_additional = [
+                    item.to_frame() if isinstance(item, pd.Series) else item
+                    for item in additional_features
+                ]
+                frames_to_concat.extend(normalized_additional)
+            features = pd.concat(frames_to_concat, axis=1)
 
         features = features.mask(np.isinf(features), pd.NA)
         features = features.ffill()
