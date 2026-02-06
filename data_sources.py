@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from typing import Iterable
+from collections import deque
 import logging
 import io
 from pathlib import Path
@@ -259,10 +260,29 @@ class TwelveDataClient:
     cache_ttl_minutes: int = 15
     retries: int = 3
     backoff: float = 0.5
+    rate_limit_per_minute: int = 8
     _session: requests.Session = field(init=False, repr=False)
+    _request_timestamps: deque[float] = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         self._session = _create_session(self.retries, self.backoff)
+        self._request_timestamps = deque()
+
+    def _throttle(self) -> None:
+        if self.rate_limit_per_minute <= 0:
+            return
+        window = 60.0
+        while True:
+            now = time.monotonic()
+            while self._request_timestamps and now - self._request_timestamps[0] >= window:
+                self._request_timestamps.popleft()
+            if len(self._request_timestamps) < self.rate_limit_per_minute:
+                self._request_timestamps.append(now)
+                return
+            wait_seconds = window - (now - self._request_timestamps[0])
+            if wait_seconds > 0:
+                LOGGER.info("Twelve Data rate limit hit, sleeping %.2fs", wait_seconds)
+                time.sleep(wait_seconds)
 
     def get_intraday_series(
         self,
@@ -288,6 +308,7 @@ class TwelveDataClient:
         if end:
             params["end_date"] = end.isoformat()
 
+        self._throttle()
         response = self._session.get(url, params=params, timeout=self.timeout)
         response.raise_for_status()
         payload = response.json()
@@ -343,6 +364,7 @@ class TwelveDataClient:
         if end:
             params["end_date"] = end.isoformat()
 
+        self._throttle()
         response = self._session.get(url, params=params, timeout=self.timeout)
         response.raise_for_status()
         payload = response.json()
@@ -389,6 +411,7 @@ class TwelveDataClient:
             "order": "DESC",
             "outputsize": 1,
         }
+        self._throttle()
         response = self._session.get(url, params=params, timeout=self.timeout)
         response.raise_for_status()
         payload = response.json()
@@ -409,6 +432,7 @@ class TwelveDataClient:
             "order": "DESC",
             "outputsize": 1,
         }
+        self._throttle()
         response = self._session.get(url, params=params, timeout=self.timeout)
         response.raise_for_status()
         payload = response.json()

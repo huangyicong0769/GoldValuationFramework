@@ -10,6 +10,211 @@ from config import Settings
 
 LOGGER = logging.getLogger(__name__)
 
+
+def _looks_like_table_line(line: str) -> bool:
+    stripped = line.strip()
+    if "|" not in stripped:
+        return False
+    if stripped.startswith("|"):
+        return True
+    if stripped.endswith("|") and stripped.count("|") >= 2:
+        return True
+    return False
+
+
+def _is_table_separator_line(line: str) -> bool:
+    stripped = line.strip()
+    if not stripped.startswith("|"):
+        return False
+    # e.g. |---|---:|:---|
+    inner = stripped.strip("|")
+    cells = [c.strip() for c in inner.split("|")]
+    if not cells:
+        return False
+    for cell in cells:
+        if not cell:
+            return False
+        normalized = cell.replace(":", "").replace("-", "")
+        if normalized:
+            return False
+        if cell.replace(":", "").count("-") < 3:
+            return False
+    return True
+
+
+def _normalize_table_row(line: str) -> str:
+    stripped = line.strip()
+    # Keep leading/trailing pipe; normalize spacing inside.
+    if not stripped.startswith("|"):
+        # Try to treat as a row if it has many pipes.
+        if stripped.count("|") < 2:
+            return line.rstrip()
+        stripped = "|" + stripped
+    if not stripped.endswith("|"):
+        stripped = stripped + "|"
+
+    inner = stripped.strip("|")
+    cells = [c.strip() for c in inner.split("|")]
+    return "| " + " | ".join(cells) + " |"
+
+
+def _split_list_items_in_line(line: str) -> list[str]:
+    stripped = line.lstrip()
+    if not stripped.startswith("- "):
+        return [line]
+    content = stripped[2:]
+    # Split when a list-like dash is glued after punctuation, avoiding negative numbers.
+    content = re.sub(r"([。！？.!?；;:：）)])-(?=\D)", r"\1\n- ", content)
+    # Split when a bold number/value is followed by a dash and a non-digit label.
+    content = re.sub(r"(\*\*[^*]+\*\*)-(?=\D)", r"\1\n- ", content)
+    # Split on spaced dashes (" - ").
+    content = re.sub(r"(?<!\d)\s-\s+(?=\S)", "\n- ", content)
+    parts = [p.strip() for p in content.split("\n- ") if p.strip()]
+    return ["- " + parts[0]] + ["- " + part for part in parts[1:]] if parts else [line]
+
+
+def _normalize_heading_line(line: str) -> str:
+    stripped = line.lstrip()
+    if not stripped.startswith("#"):
+        return line
+    # Remove spaces between consecutive heading markers (e.g., "# #" -> "##").
+    compact = re.sub(r"^(#+)(?:\s+#+)+", lambda m: "#" * m.group(0).count("#"), stripped)
+    compact = re.sub(r"^(#{1,6})\s*", r"\1 ", compact)
+    compact = re.sub(r"^(#{1,6}\s+\d+\))(?=\S)", r"\1 ", compact)
+    return compact
+
+
+def normalize_markdown(text: str) -> str:
+    """Best-effort Markdown fixer for LLM output.
+
+    The LLM sometimes collapses newlines so headings/lists/tables get glued together.
+    This normalizer focuses on layout (newlines/spaces) without changing meaning.
+    """
+    if not text:
+        return text
+
+    md = text.replace("\r\n", "\n").replace("\r", "\n").strip()
+
+    # 1) Ensure horizontal rules are standalone.
+    md = re.sub(r"(?<!\n)\s*---\s*(?=#+)", "\n\n---\n\n", md)
+    md = re.sub(r"(?m)^[ \t]*---[ \t]*(?=\S)", "---\n\n", md)
+
+    # 2) Force headings to start on new lines (helps when everything is one line).
+    md = re.sub(r"(?<!\n)(#{1,6})(?=\S)", r"\n\n\1", md)
+
+    # 3) Exactly one space after heading markers.
+    md = re.sub(r"(?m)^(#{1,6})\s*", r"\1 ", md)
+    md = re.sub(r"(?m)^(#{1,6})\s{2,}", r"\1 ", md)
+
+    # 4) Break inline list items that got appended to the previous sentence or heading.
+    md = re.sub(r"([。！？.!?；;:：])\s*-\s*(?=\S)", r"\1\n\n- ", md)
+    md = re.sub(r"([。！？.!?；;:：])\s*(\d+\.|\d+\))(?=\S)", r"\1\n\n\2 ", md)
+    # If a heading is glued to list items via dash, split only for CJK text (avoid hyphenated words).
+    md = re.sub(
+        r"(?m)^(#{1,6}[^\n]*?)([\u4e00-\u9fff])-(?=[\u4e00-\u9fff])",
+        r"\1\2\n\n- ",
+        md,
+    )
+    # Split chained list items stuck on the same line (e.g. "- A - B - C").
+    md = re.sub(r"(?m)^-\s*(?=\S)", "- ", md)
+    md = re.sub(r"(?m)^(\d+)\)(?=\S)", r"\1) ", md)
+    md = re.sub(r"(?m)^(\d+)\.(?=\S)", r"\1. ", md)
+
+    # 5) Tables: if rows are glued via "||", split them into lines.
+    # Only attempt if it looks like a table exists.
+    if "|---" in md and "||" in md:
+        md = md.replace("||", "|\n|")
+
+    # 6) Per-line cleanup: normalize table rows and ensure blank lines around tables.
+    raw_lines = md.split("\n")
+    normalized_lines: list[str] = []
+    for raw in raw_lines:
+        if "|" in raw:
+            pipe_index = raw.find("|")
+            if pipe_index > 0:
+                before = raw[:pipe_index].strip()
+                after = raw[pipe_index:].strip()
+                if before and after.count("|") >= 2:
+                    normalized_lines.append(before)
+                    normalized_lines.append(after)
+                    continue
+        normalized_lines.append(raw)
+
+    raw_lines = normalized_lines
+    out_lines: list[str] = []
+    in_table = False
+    table_header_cols: int | None = None
+    for line in raw_lines:
+        if _looks_like_table_line(line):
+            normalized = _normalize_table_row(line)
+            cells = [c.strip() for c in normalized.strip("|").split("|")]
+            if all(not cell for cell in cells):
+                continue
+            if not in_table:
+                # Ensure a blank line before starting a table block.
+                if out_lines and out_lines[-1].strip() != "":
+                    out_lines.append("")
+                in_table = True
+                table_header_cols = None
+            if _is_table_separator_line(normalized):
+                # Keep separator line compact but consistent.
+                normalized = normalized.replace(" |", "|").replace("| ", "|")
+                out_lines.append(normalized.rstrip())
+                continue
+            if table_header_cols is None:
+                table_header_cols = len(cells)
+            if table_header_cols is not None and len(cells) > table_header_cols:
+                primary = cells[:table_header_cols]
+                extras = [c for c in cells[table_header_cols:] if c]
+                out_lines.append("| " + " | ".join(primary) + " |")
+                if extras:
+                    out_lines.append("")
+                    out_lines.append(" ".join(extras))
+                    out_lines.append("")
+                continue
+            out_lines.append("| " + " | ".join(cells) + " |")
+            continue
+
+        if in_table:
+            # Ensure a blank line after table block.
+            if out_lines and out_lines[-1].strip() != "":
+                out_lines.append("")
+            in_table = False
+            table_header_cols = None
+
+        if line.lstrip().startswith("- "):
+            out_lines.extend(_split_list_items_in_line(line.rstrip()))
+        else:
+            out_lines.append(_normalize_heading_line(line.rstrip()))
+
+    # 6.1) Merge orphaned heading markers (e.g., "###" followed by "1) ...").
+    merged_lines: list[str] = []
+    i = 0
+    while i < len(out_lines):
+        current = out_lines[i].strip()
+        if re.fullmatch(r"#{1,6}", current) and i + 1 < len(out_lines):
+            nxt = out_lines[i + 1].strip()
+            if nxt and not nxt.startswith("#"):
+                merged = f"{current} {nxt}"
+                merged_lines.append(merged)
+                i += 2
+                continue
+        merged_lines.append(out_lines[i])
+        i += 1
+
+    md = "\n".join(merged_lines).strip()
+
+    # 6.2) Normalize any remaining heading lines after merging.
+    md = "\n".join(_normalize_heading_line(line) for line in md.split("\n")).strip()
+
+    # 6.3) Fix accidental list-like horizontal rules ("- --").
+    md = re.sub(r"(?m)^-\s*-{2,}\s*$", "---", md)
+
+    # 7) Collapse excessive blank lines.
+    md = re.sub(r"\n{3,}", "\n\n", md)
+
+    return md + "\n"
+
 class LLMClient:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
@@ -205,7 +410,7 @@ class LLMClient:
                     content = "".join(parts)
                 if content:
                     self._record_last_call()
-                    return str(content)
+                    return normalize_markdown(str(content))
 
                 if attempt < attempts - 1:
                     LOGGER.warning("LLM response empty; retrying in %s seconds.", self.empty_retry_delay_seconds)

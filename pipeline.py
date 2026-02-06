@@ -213,18 +213,23 @@ class GoldValuationPipeline:
                 else:
                     raw = cached_raw.loc[pd.Timestamp(desired_start) : pd.Timestamp(data_end)]
             else:
-                update_start = cached_end
-                LOGGER.info("Incremental update from %s to %s", update_start, data_end)
-                if frequency == "day":
-                    fresh = self.builder.build_dataset(macro_factors, market_factors, update_start, data_end)
+                if desired_start < cached_start:
+                    LOGGER.info("Requested start before cache range, rebuild dataset")
+                    rebuild_cache = True
+                    raw = None
                 else:
-                    fresh = self.hub.fetch_gold_intraday(update_start, data_end, self.symbol).to_frame()
-                raw = (
-                    pd.concat([cached_raw, fresh])
-                    .sort_index()
-                    .loc[lambda frame: ~frame.index.duplicated(keep="last")]
-                )
-                raw = raw.ffill().dropna()
+                    update_start = cached_end
+                    LOGGER.info("Incremental update from %s to %s", update_start, data_end)
+                    if frequency == "day":
+                        fresh = self.builder.build_dataset(macro_factors, market_factors, update_start, data_end)
+                    else:
+                        fresh = self.hub.fetch_gold_intraday(update_start, data_end, self.symbol).to_frame()
+                    raw = (
+                        pd.concat([cached_raw, fresh])
+                        .sort_index()
+                        .loc[lambda frame: ~frame.index.duplicated(keep="last")]
+                    )
+                    raw = raw.ffill().dropna()
         if raw is None or rebuild_cache:
             if frequency == "day":
                 raw = self.builder.build_dataset(macro_factors, market_factors, start, data_end)
@@ -558,18 +563,23 @@ class GoldValuationPipeline:
                 else:
                     raw = cached_raw.loc[pd.Timestamp(desired_start) : pd.Timestamp(data_end)]
             else:
-                update_start = cached_end
-                LOGGER.info("Incremental update from %s to %s", update_start, data_end)
-                if frequency == "day":
-                    fresh = self.builder.build_dataset(macro_factors, market_factors, update_start, data_end)
+                if desired_start < cached_start:
+                    LOGGER.info("Requested start before cache range, rebuild dataset")
+                    rebuild_cache = True
+                    raw = None
                 else:
-                    fresh = self.hub.fetch_gold_intraday(update_start, data_end, self.symbol).to_frame()
-                raw = (
-                    pd.concat([cached_raw, fresh])
-                    .sort_index()
-                    .loc[lambda frame: ~frame.index.duplicated(keep="last")]
-                )
-                raw = raw.ffill().dropna()
+                    update_start = cached_end
+                    LOGGER.info("Incremental update from %s to %s", update_start, data_end)
+                    if frequency == "day":
+                        fresh = self.builder.build_dataset(macro_factors, market_factors, update_start, data_end)
+                    else:
+                        fresh = self.hub.fetch_gold_intraday(update_start, data_end, self.symbol).to_frame()
+                    raw = (
+                        pd.concat([cached_raw, fresh])
+                        .sort_index()
+                        .loc[lambda frame: ~frame.index.duplicated(keep="last")]
+                    )
+                    raw = raw.ffill().dropna()
         if raw is None or rebuild_cache:
             if frequency == "day":
                 raw = self.builder.build_dataset(macro_factors, market_factors, start, data_end)
