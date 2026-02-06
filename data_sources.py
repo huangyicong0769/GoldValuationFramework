@@ -7,6 +7,13 @@ import logging
 import io
 from pathlib import Path
 import hashlib
+import random
+import time
+import html
+import re
+import time
+from email.utils import parsedate_to_datetime
+import xml.etree.ElementTree as ET
 
 import pandas as pd
 import requests
@@ -101,8 +108,8 @@ class FREDClient:
         if not path or not path.exists():
             return None
         if self.cache_ttl_days > 0:
-            mtime = datetime.fromtimestamp(path.stat().st_mtime)
-            if datetime.now() - mtime > timedelta(days=self.cache_ttl_days):
+            age_seconds = time.time() - path.stat().st_mtime
+            if age_seconds > self.cache_ttl_days * 86400:
                 return None
         try:
             return pd.read_pickle(path)
@@ -442,8 +449,8 @@ class TwelveDataClient:
         if not path or not path.exists():
             return None
         if self.cache_ttl_minutes > 0:
-            mtime = datetime.fromtimestamp(path.stat().st_mtime)
-            if datetime.now() - mtime > timedelta(minutes=self.cache_ttl_minutes):
+            age_seconds = time.time() - path.stat().st_mtime
+            if age_seconds > self.cache_ttl_minutes * 60:
                 return None
         try:
             payload = pd.read_pickle(path)
@@ -588,3 +595,343 @@ class GoldDataHub:
                 except Exception as fallback_exc:  # noqa: BLE001
                     LOGGER.warning("Fallback realtime price failed: %s", fallback_exc)
             return None
+
+
+@dataclass(frozen=True)
+class NewsSource:
+    name: str
+    category: str
+    url: str
+    priority: int = 0
+
+
+@dataclass
+class NewsClient:
+    sources: list[NewsSource]
+    timeout: int = 20
+    cache_dir: str | None = None
+    cache_ttl_hours: int = 24
+    retries: int = 2
+    backoff: float = 0.6
+    min_interval_seconds: float = 1.5
+    max_total_items: int = 120
+    max_items_per_category: int = 40
+    category_limits: dict | None = None
+    _session: requests.Session = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        self._session = _create_session(self.retries, self.backoff)
+
+    def fetch_news(self, limit_per_source: int = 12) -> dict:
+        fetched_at = datetime.utcnow().isoformat()
+        items: list[dict] = []
+        for source in self.sources:
+            cache_status = self._cache_status(source)
+            if cache_status == "hit":
+                cached = self._load_cache(source, ignore_ttl=True)
+                if cached is not None:
+                    LOGGER.info("News cache hit: %s %s", source.name, source.category)
+                    items.extend(self._strip_output_fields(cached.get("items", []), remove_links=False))
+                    continue
+            elif cache_status == "expired":
+                LOGGER.info("News cache expired: %s %s", source.name, source.category)
+            else:
+                LOGGER.info("News cache miss: %s %s", source.name, source.category)
+
+            try:
+                payload = self._fetch_source(source, limit_per_source)
+                cached_items = self._attach_fetched_at(payload.get("items", []), payload.get("fetched_at"))
+                cached_payload = dict(payload)
+                cached_payload["items"] = cached_items
+                self._save_cache(source, cached_payload)
+                items.extend(self._strip_output_fields(payload.get("items", []), remove_links=False))
+            except Exception as exc:  # noqa: BLE001
+                LOGGER.warning("News source failed (%s %s): %s", source.name, source.category, exc)
+                stale = self._load_cache(source, ignore_ttl=True)
+                if stale is not None:
+                    LOGGER.info(
+                        "News fallback cache used: %s %s (cached at %s)",
+                        source.name,
+                        source.category,
+                        stale.get("fetched_at"),
+                    )
+                    items.extend(self._strip_output_fields(stale.get("items", []), remove_links=False))
+
+            self._apply_min_interval()
+        items = self._dedupe_items(items)
+        items = self._limit_items(items)
+        return {
+            "fetched_at": fetched_at,
+            "items": items,
+        }
+
+    def _apply_min_interval(self) -> None:
+        if self.min_interval_seconds <= 0:
+            return
+        jitter = random.uniform(0, 0.6)
+        time.sleep(self.min_interval_seconds + jitter)
+
+    def _fetch_source(self, source: NewsSource, limit_per_source: int) -> dict:
+        headers = self._build_headers()
+        response = self._session.get(source.url, headers=headers, timeout=self.timeout)
+        response.raise_for_status()
+        text = response.text
+        items = self._parse_feed(text, source, limit_per_source)
+        return {
+            "fetched_at": datetime.utcnow().isoformat(),
+            "source": source.name,
+            "category": source.category,
+            "items": items,
+        }
+
+    def _build_headers(self) -> dict:
+        user_agents = [
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        ]
+        return {
+            "User-Agent": random.choice(user_agents),
+            "Accept": "application/rss+xml, application/atom+xml, application/xml;q=0.9, text/xml;q=0.8, */*;q=0.1",
+            "Accept-Language": "en-US,en;q=0.9,zh-CN;q=0.8",
+            "Cache-Control": "no-cache",
+            "Pragma": "no-cache",
+        }
+
+    def _parse_feed(self, content: str, source: NewsSource, limit_per_source: int) -> list[dict]:
+        try:
+            root = ET.fromstring(content)
+        except ET.ParseError:
+            return []
+
+        items: list[dict] = []
+
+        channel = root.find("channel")
+        if channel is not None:
+            for item in channel.findall("item"):
+                parsed = self._parse_rss_item(item, source)
+                if parsed:
+                    items.append(parsed)
+                if len(items) >= limit_per_source:
+                    break
+            return items
+
+        if root.tag.endswith("feed"):
+            for entry in root.findall("{*}entry"):
+                parsed = self._parse_atom_entry(entry, source)
+                if parsed:
+                    items.append(parsed)
+                if len(items) >= limit_per_source:
+                    break
+        return items
+
+    def _parse_rss_item(self, item: ET.Element, source: NewsSource) -> dict | None:
+        title = self._get_text(item.find("title"))
+        link = self._get_text(item.find("link"))
+        pub_date = self._get_text(item.find("pubDate"))
+        summary = self._get_text(item.find("description"))
+        return self._build_item(source, title, link, pub_date, summary)
+
+    def _parse_atom_entry(self, entry: ET.Element, source: NewsSource) -> dict | None:
+        title = self._get_text(entry.find("{*}title"))
+        link = None
+        link_el = entry.find("{*}link")
+        if link_el is not None:
+            link = link_el.attrib.get("href") or link_el.text
+        updated = self._get_text(entry.find("{*}updated"))
+        summary = self._get_text(entry.find("{*}summary")) or self._get_text(entry.find("{*}content"))
+        return self._build_item(source, title, link, updated, summary)
+
+    def _build_item(
+        self,
+        source: NewsSource,
+        title: str | None,
+        link: str | None,
+        published_raw: str | None,
+        summary: str | None,
+    ) -> dict | None:
+        if not title:
+            return None
+        published_at = self._parse_published_at(published_raw)
+        cleaned_summary = self._clean_text(summary)
+        return {
+            "source": source.name,
+            "category": source.category,
+            "priority": source.priority,
+            "title": title.strip(),
+            "link": link.strip() if link else None,
+            "published_at": published_at,
+            "summary": cleaned_summary,
+        }
+
+    @staticmethod
+    def _get_text(element: ET.Element | None) -> str | None:
+        if element is None:
+            return None
+        text = element.text or ""
+        return text.strip() if text else None
+
+    @staticmethod
+    def _clean_text(text: str | None) -> str | None:
+        if not text:
+            return None
+        cleaned = html.unescape(text)
+        cleaned = re.sub(r"<[^>]+>", "", cleaned)
+        cleaned = re.sub(r"\s+", " ", cleaned).strip()
+        return cleaned if cleaned else None
+
+    @staticmethod
+    def _parse_published_at(value: str | None) -> str | None:
+        if not value:
+            return None
+        try:
+            return parsedate_to_datetime(value).isoformat()
+        except Exception:
+            pass
+        try:
+            return datetime.fromisoformat(value.replace("Z", "+00:00")).isoformat()
+        except Exception:
+            return None
+
+    @staticmethod
+    def _attach_fetched_at(items: list[dict], fetched_at: str | None) -> list[dict]:
+        if not fetched_at:
+            return items
+        enriched: list[dict] = []
+        for item in items:
+            if isinstance(item, dict):
+                payload = dict(item)
+                payload["source_fetched_at"] = fetched_at
+                enriched.append(payload)
+            else:
+                enriched.append(item)
+        return enriched
+
+    @staticmethod
+    def _strip_output_fields(items: list[dict], remove_links: bool = False) -> list[dict]:
+        stripped: list[dict] = []
+        for item in items:
+            if isinstance(item, dict):
+                payload = dict(item)
+                payload.pop("source_fetched_at", None)
+                if remove_links:
+                    payload.pop("link", None)
+                stripped.append(payload)
+            else:
+                stripped.append(item)
+        return stripped
+
+    @staticmethod
+    def strip_for_llm_payload(payload: dict | None) -> dict | None:
+        if not payload or not isinstance(payload, dict):
+            return payload
+        items = payload.get("items", [])
+        stripped_items = NewsClient._strip_output_fields(items, remove_links=True)
+        sanitized = dict(payload)
+        sanitized["items"] = stripped_items
+        return sanitized
+
+    def _cache_status(self, source: NewsSource) -> str:
+        path = self._cache_path(source)
+        if not path or not path.exists():
+            return "miss"
+        if self.cache_ttl_hours <= 0:
+            return "hit"
+        mtime = datetime.fromtimestamp(path.stat().st_mtime)
+        if datetime.now() - mtime > timedelta(hours=self.cache_ttl_hours):
+            return "expired"
+        return "hit"
+
+    @staticmethod
+    def _dedupe_items(items: list[dict]) -> list[dict]:
+        seen: set[str] = set()
+        deduped: list[dict] = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            title = (item.get("title") or "").strip().lower()
+            source = (item.get("source") or "").strip().lower()
+            published = (item.get("published_at") or "").strip()
+            summary = (item.get("summary") or "").strip().lower()
+            key = "|".join([source, title, published, summary])
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            deduped.append(item)
+        return deduped
+
+    def _limit_items(self, items: list[dict]) -> list[dict]:
+        if not items:
+            return items
+        def _sort_key(item: dict) -> tuple[int, str]:
+            priority = item.get("priority")
+            try:
+                priority_val = int(priority) if priority is not None else 0
+            except Exception:
+                priority_val = 0
+            ts = item.get("published_at") or ""
+            return (priority_val, ts)
+
+        try:
+            items_sorted = sorted(items, key=_sort_key, reverse=True)
+        except Exception:
+            items_sorted = items
+
+        per_category_default = max(1, int(self.max_items_per_category))
+        total_limit = max(1, int(self.max_total_items))
+
+        buckets: dict[str, list[dict]] = {}
+        for item in items_sorted:
+            category = (item.get("category") or "unknown").strip().lower()
+            buckets.setdefault(category, []).append(item)
+
+        trimmed: list[dict] = []
+        limits = self.category_limits or {}
+        for category, group in buckets.items():
+            limit = limits.get(category, per_category_default)
+            try:
+                limit_int = max(1, int(limit))
+            except Exception:
+                limit_int = per_category_default
+            trimmed.extend(group[:limit_int])
+
+        if len(trimmed) > total_limit:
+            trimmed = sorted(trimmed, key=_sort_key, reverse=True)[:total_limit]
+        return trimmed
+
+    def _cache_path(self, source: NewsSource) -> Path | None:
+        if not self.cache_dir:
+            return None
+        today = date.today().isoformat()
+        key = f"{source.name}|{source.category}|{source.url}|{today}"
+        digest = hashlib.md5(key.encode("utf-8")).hexdigest()
+        base = Path(self.cache_dir)
+        base.mkdir(parents=True, exist_ok=True)
+        safe_name = re.sub(r"[^a-zA-Z0-9_-]+", "_", source.name.lower())
+        return base / f"{safe_name}_{source.category}_{digest}.json"
+
+    def _load_cache(self, source: NewsSource, ignore_ttl: bool = False) -> dict | None:
+        path = self._cache_path(source)
+        if not path or not path.exists():
+            return None
+        if self.cache_ttl_hours > 0 and not ignore_ttl:
+            age_seconds = time.time() - path.stat().st_mtime
+            if age_seconds > self.cache_ttl_hours * 3600:
+                return None
+        try:
+            import json
+
+            return json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+
+    def _save_cache(self, source: NewsSource, payload: dict) -> None:
+        path = self._cache_path(source)
+        if not path:
+            return
+        try:
+            import json
+
+            path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception:
+            LOGGER.debug("Failed to write news cache for %s", source.name)

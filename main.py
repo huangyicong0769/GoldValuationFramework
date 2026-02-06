@@ -11,6 +11,7 @@ from pathlib import Path
 import markdown
 
 from config import Settings
+from data_sources import NewsClient, NewsSource
 from llm_client import LLMClient
 from notification import EmailConfig, EmailNotifier
 from pipeline import GoldValuationPipeline, format_report, format_report_multi
@@ -61,6 +62,8 @@ def run_once(
     report_content = raw_report
     extension = "txt"
     structured_payload: str | None = None
+    data_dict: dict | None = None
+    news_payload: dict | None = None
 
     try:
         data_dict = asdict(result)
@@ -68,8 +71,50 @@ def run_once(
     except Exception as e:
         logging.warning("Failed to build structured payload: %s", e)
 
+    if settings.news_enabled and settings.news_sources:
+        try:
+            sources: list[NewsSource] = []
+            for raw_source in settings.news_sources:
+                if not isinstance(raw_source, dict):
+                    logging.warning(
+                        "Skipping invalid news source configuration (not a dict): %r",
+                        raw_source,
+                    )
+                    continue
+                try:
+                    source = NewsSource(**raw_source)
+                except Exception as e:
+                    logging.warning(
+                        "Skipping malformed news source configuration %r: %s",
+                        raw_source,
+                        e,
+                    )
+                    continue
+                sources.append(source)
+            if sources:
+                news_client = NewsClient(
+                    sources=sources,
+                    timeout=settings.http_timeout,
+                    cache_dir=settings.news_cache_dir,
+                    cache_ttl_hours=settings.news_cache_ttl_hours,
+                    retries=max(1, settings.http_retries),
+                    backoff=settings.http_backoff,
+                    min_interval_seconds=settings.news_min_interval_seconds,
+                    max_total_items=settings.news_max_total_items,
+                    max_items_per_category=settings.news_max_items_per_category,
+                    category_limits=settings.news_category_limits,
+                )
+                news_payload = news_client.fetch_news(
+                    limit_per_source=max(1, settings.news_max_items_per_source)
+                )
+        except Exception as e:
+            logging.warning("Failed to fetch news payload: %s", e)
+
     if output_format == "json":
         if structured_payload is not None:
+            if news_payload is not None and data_dict is not None:
+                data_dict["news"] = news_payload
+                structured_payload = json.dumps(data_dict, cls=DateEncoder, ensure_ascii=False, indent=2)
             report_content = structured_payload
             extension = "json"
         else:
@@ -77,10 +122,19 @@ def run_once(
             output_format = "text"
 
     if output_format == "text" and optimize:
+        if news_payload is not None and structured_payload is not None and data_dict is not None:
+            llm_news_payload = NewsClient.strip_for_llm_payload(news_payload)
+            data_dict["news"] = llm_news_payload
+            structured_payload = json.dumps(
+                data_dict, cls=DateEncoder, ensure_ascii=False, indent=2
+            )
         llm_client = LLMClient(settings)
         logging.info("Optimizing report with LLM...")
         report_content = llm_client.optimize_report(raw_report, structured_payload)
         extension = "md"
+    elif output_format == "text" and news_payload is not None:
+        news_text = json.dumps(news_payload, ensure_ascii=False, indent=2)
+        report_content = f"{raw_report}\n\nNEWS_JSON:\n{news_text}"
 
     print(report_content)
 

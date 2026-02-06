@@ -20,3 +20,7 @@ artifacts*/
 
 # IDE files
 .github/
+
+# Logs
+logs/
+*.log

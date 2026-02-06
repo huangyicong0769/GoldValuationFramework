@@ -18,6 +18,32 @@ def _parse_bool(value: str | None, default: bool) -> bool:
     return value.strip().lower() not in {"0", "false", "no", "off"}
 
 
+def _parse_json_list(value: str | None, default: list[dict]) -> list[dict]:
+    if not value:
+        return default
+    try:
+        import json
+
+        parsed = json.loads(value)
+        if isinstance(parsed, list):
+            return [item for item in parsed if isinstance(item, dict)]
+        return default
+    except Exception:
+        return default
+
+
+def _parse_json_dict(value: str | None, default: dict) -> dict:
+    if not value:
+        return default
+    try:
+        import json
+
+        parsed = json.loads(value)
+        return parsed if isinstance(parsed, dict) else default
+    except Exception:
+        return default
+
+
 @dataclass(frozen=True)
 class Settings:
     fred_api_key: str | None = None
@@ -52,10 +78,19 @@ class Settings:
     llm_min_interval_seconds: int = 8
     llm_lock_timeout_seconds: int = 300
     llm_max_output_tokens: int = 128000
-    llm_max_input_chars: int = 128000
+    llm_max_input_chars: int = 256000
     llm_empty_retry_count: int = 2
     llm_empty_retry_delay_seconds: int = 5
     llm_report_language: str = "Chinese"
+    news_enabled: bool = True
+    news_cache_dir: str = "artifacts/news_cache"
+    news_cache_ttl_hours: int = 24
+    news_min_interval_seconds: float = 1.5
+    news_max_items_per_source: int = 12
+    news_max_total_items: int = 120
+    news_max_items_per_category: int = 40
+    news_category_limits: dict | None = None
+    news_sources: list[dict] | None = None
 
 
     @staticmethod
@@ -116,6 +151,15 @@ class Settings:
             llm_report_language=os.getenv("LLM_REPORT_LANGUAGE", "Chinese"),
             llm_empty_retry_count=int(os.getenv("LLM_EMPTY_RETRY_COUNT", "2")),
             llm_empty_retry_delay_seconds=int(os.getenv("LLM_EMPTY_RETRY_DELAY_SECONDS", "5")),
+            news_enabled=_parse_bool(os.getenv("NEWS_ENABLED"), True),
+            news_cache_dir=os.getenv("NEWS_CACHE_DIR", "artifacts/news_cache"),
+            news_cache_ttl_hours=int(os.getenv("NEWS_CACHE_TTL_HOURS", "24")),
+            news_min_interval_seconds=float(os.getenv("NEWS_MIN_INTERVAL_SECONDS", "1.5")),
+            news_max_items_per_source=int(os.getenv("NEWS_MAX_ITEMS_PER_SOURCE", "12")),
+            news_max_total_items=int(os.getenv("NEWS_MAX_TOTAL_ITEMS", "120")),
+            news_max_items_per_category=int(os.getenv("NEWS_MAX_ITEMS_PER_CATEGORY", "40")),
+            news_category_limits=_parse_json_dict(os.getenv("NEWS_CATEGORY_LIMITS_JSON"), {}),
+            news_sources=_parse_json_list(os.getenv("NEWS_SOURCES_JSON"), DEFAULT_NEWS_SOURCES),
         )
 
 
@@ -160,6 +204,130 @@ DEFAULT_MARKET_FACTORS = [
     "dji",
     "ndx",
     "vix",
+]
+
+DEFAULT_NEWS_SOURCES: list[dict] = [
+    {
+        "name": "CME",
+        "category": "finance",
+        "url": "https://www.cmegroup.com/rss/press-releases.xml",
+        "priority": 10,
+    },
+    {
+        "name": "Reuters",
+        "category": "homepage",
+        "url": "https://feeds.reuters.com/reuters/topNews",
+    },
+    {
+        "name": "Reuters",
+        "category": "finance",
+        "url": "https://feeds.reuters.com/reuters/businessNews",
+    },
+    {
+        "name": "Reuters",
+        "category": "politics",
+        "url": "https://feeds.reuters.com/Reuters/worldNews",
+    },
+    {
+        "name": "BBC",
+        "category": "homepage",
+        "url": "https://feeds.bbci.co.uk/news/rss.xml",
+    },
+    {
+        "name": "BBC",
+        "category": "finance",
+        "url": "https://feeds.bbci.co.uk/news/business/rss.xml",
+    },
+    {
+        "name": "BBC",
+        "category": "politics",
+        "url": "https://feeds.bbci.co.uk/news/world/rss.xml",
+    },
+    {
+        "name": "BBC",
+        "category": "politics",
+        "url": "https://feeds.bbci.co.uk/news/politics/rss.xml",
+    },
+    {
+        "name": "CNBC",
+        "category": "homepage",
+        "url": "https://www.cnbc.com/id/100003114/device/rss/rss.html",
+    },
+    {
+        "name": "CNBC",
+        "category": "finance",
+        "url": "https://www.cnbc.com/id/10000664/device/rss/rss.html",
+    },
+    {
+        "name": "MarketWatch",
+        "category": "homepage",
+        "url": "https://feeds.marketwatch.com/marketwatch/topstories/",
+    },
+    {
+        "name": "MarketWatch",
+        "category": "finance",
+        "url": "https://feeds.marketwatch.com/marketwatch/markets/",
+    },
+    {
+        "name": "NYTimes",
+        "category": "finance",
+        "url": "https://rss.nytimes.com/services/xml/rss/nyt/Business.xml",
+    },
+    {
+        "name": "NYTimes",
+        "category": "politics",
+        "url": "https://rss.nytimes.com/services/xml/rss/nyt/World.xml",
+    },
+    {
+        "name": "AP",
+        "category": "homepage",
+        "url": "https://feeds.apnews.com/apf-topnews",
+    },
+    {
+        "name": "AP",
+        "category": "politics",
+        "url": "https://feeds.apnews.com/apf-politics",
+    },
+    {
+        "name": "AP",
+        "category": "finance",
+        "url": "https://feeds.apnews.com/apf-business",
+    },
+    {
+        "name": "TheGuardian",
+        "category": "homepage",
+        "url": "https://www.theguardian.com/international/rss",
+    },
+    {
+        "name": "TheGuardian",
+        "category": "finance",
+        "url": "https://www.theguardian.com/business/rss",
+    },
+    {
+        "name": "TheGuardian",
+        "category": "politics",
+        "url": "https://www.theguardian.com/world/rss",
+    },
+    {
+        "name": "NPR",
+        "category": "homepage",
+        "url": "https://feeds.npr.org/1001/rss.xml",
+    },
+    {
+        "name": "NPR",
+        "category": "finance",
+        "url": "https://feeds.npr.org/1006/rss.xml",
+    },
+    {
+        "name": "NPR",
+        "category": "politics",
+        "url": "https://feeds.npr.org/1004/rss.xml",
+    },
+    {
+        "name": "AlJazeera",
+        "category": "homepage",
+        "url": "https://www.aljazeera.com/xml/rss/all.xml",
+    },
 ]
 
 FACTOR_DESCRIPTIONS: dict[str, str] = {

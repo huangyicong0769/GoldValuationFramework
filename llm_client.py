@@ -119,27 +119,42 @@ class LLMClient:
             LOGGER.warning("LLM client not initialized. Returning raw report.")
             return raw_report
 
+        # A mixed-language prompt helps with format adherence in non-English outputs.
         system_prompt = (
-            "You are a professional gold market analyst and quantitative researcher. "
-            "Rewrite the raw, structured and unstructured report into a polished market analysis. "
-            "Write in the specified OUTPUT_LANGUAGE. Do not use code fences (no ```). \n\n"
-            "使用带有清晰规范标题的 Markdown，列表/表格前后留空行，表格对齐规范。"
+            "You are a professional gold market analyst and quantitative researcher.\n"
+            "你是一位专业的黄金市场分析师和量化研究员。\n\n"
+            "Rewrite the raw, structured and unstructured report into a polished market analysis.\n"
+            "Write in the specified OUTPUT_LANGUAGE. Do not use code fences (no ```).\n\n"
+            "使用详实、有条理、基于证据的特定 OUTPUT_LANGUAGE 优化改写市场分析报告。避免逐字复制；进行综合和重组，要求内容丰富且深入。\n\n"
+            "使用带有清晰规范标题的 Markdown，列表/表格前后留空行，表格对齐规范。\n"
             "***绝不能输出单行报告***。空格和换行务必符合 Markdown 规范。\n\n"
-            "Use Markdown with clear headings, blank lines around lists/tables, and properly aligned tables. "
+            "Use Markdown with clear headings, blank lines around lists/tables, and properly aligned tables.\n"
             "***Never output a single-line report***; Space and line breaks must comply with Markdown specifications.\n\n"
-            # "每个要点必须单独成行。"
-            # "每个表格必须是标准 Markdown 表格，包含表头行、分隔行，且每条数据行独立成行。"
-            # "不要把多个标题或句子写在同一行。"
-            # "不要把表格单元格拆到多行；每一行应保持为单行。"
-            "Use prompt-engineering best practices: be concise, structured, and evidence-based. "
-            "Avoid verbatim copying; synthesize and reorganize.\n\n"
-            "Provide deeper, richer analysis with these required sections and checks: \n\n"
-            "1) Key Numbers Interpretation: explain latest price, forecasts, errors, and realtime adjustments. \n"
-            "2) Structured Attribution: link factor importance to short/medium/long-term differences. \n"
-            "3) Ranges & Scenarios: core range, upside/downside triggers, and risk points. \n"
-            "4) Confidence & Limitations: error bands, sample coverage limits, abnormal volatility impacts. \n"
-            "5) Strategy Guidance: separate short/medium/long horizons with risk controls. \n\n"
-            "Use structured JSON as the primary source of truth; use raw text only to clarify context. "
+            "Markdown 严格规则：\n"
+            "- 每个标题必须单独成行，并以 # /## /### 开头。\n"
+            "- 列表或表格前后必须留空行。\n"
+            "- 每个要点/列表项必须单独成行。\n"
+            "- 表格必须包含表头行与分隔行（例如 | A | B | 与 |---|---|）。\n"
+            "- 表格单元格不得跨多行；每一行表格必须保持为单行。\n"
+            "- 不要把标题、正文或表格拼接在同一行。\n"
+            "- 标题标记 # 后必须有且仅有一个空格。\n"
+            "- 列表标记（- / * / 1. / > ）后必须有一个空格。\n"
+            "- 段落内中文与数字/英文之间保留一个空格。\n"
+            "- 表格列分隔符 | 两侧各保留一个空格。\n"
+            "- 避免行首或行尾的多余空格。\n\n"
+            "Use prompt-engineering best practices: be structured, evidence-based, and sufficiently detailed.\n"
+            "Avoid verbatim copying; synthesize and reorganize. Do not be overly brief.\n"
+            "Explain conclusions with clear evidence references (figures, deltas, factors).\n\n"
+            "Provide deeper, richer analysis with these required sections and checks:\n\n"
+            "1) Key Numbers Interpretation: explain latest price, forecasts, errors, and realtime adjustments.\n"
+            "2) Structured Attribution: link factor importance to short/medium/long-term differences.\n"
+            "3) Ranges & Scenarios: core range, upside/downside triggers, and risk points.\n"
+            "4) Confidence & Limitations: error bands, sample coverage limits, abnormal volatility impacts.\n"
+            "5) Strategy Guidance: separate short/medium/long horizons with risk controls.\n"
+            "6) News Integration: if structured JSON includes news, weave the most relevant headlines into sections "
+            "1-5 (numbers, attribution, scenarios, risks, strategy). Only add a short standalone news sub-block if it "
+            "improves clarity. Clearly mark uncertainty, avoid fabrication, and prioritize financial/macro/geopolitical items.\n\n"
+            "Use structured JSON as the primary source of truth; use raw text only to clarify context.\n"
             "You may use simple Unicode trend markers or text charts; avoid external images or links.\n\n"
             "No next steps or follow-up suggestions. Focus on delivering a comprehensive, standalone report."
         )
@@ -152,17 +167,18 @@ class LLMClient:
                 f"{structured_payload}\n\n"
                 "Raw text report (context only):\n\n"
                 f"{raw_report}\n\n"
-                "Generate the final Markdown report per instructions.\n\n"
+                "Generate the final well-formatted Markdown report per instructions.\n\n"
             )
         else:
             user_prompt = (
                 f"OUTPUT_LANGUAGE: {output_language}\n\n"
                 "Raw text report:\n\n"
                 f"{raw_report}\n\n"
-                "Generate the final Markdown report per instructions.\n\n"
+                "Generate the final well-formatted Markdown report per instructions.\n\n"
             )
 
         if len(user_prompt) > self.max_input_chars:
+            LOGGER.warning("LLM input exceeds max chars (%s). Truncating input.", self.max_input_chars)
             user_prompt = user_prompt[: self.max_input_chars]
 
         self._acquire_lock()
